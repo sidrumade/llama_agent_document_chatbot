@@ -2,13 +2,51 @@ import streamlit as st
 import os
 from datetime import datetime
 import time
+import logging
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, StorageContext, load_index_from_storage
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+from llama_index.core.callbacks import CallbackManager, CBEventType
+from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 from llama_index.core.chat_engine.types import ChatMode
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Define the custom callback handler for timing
+class TimingCallbackHandler(BaseCallbackHandler):
+    def __init__(self, event_starts_to_ignore=[], event_types_to_ignore=[]):
+        super().__init__(event_starts_to_ignore, event_types_to_ignore)
+        self.timings = {}
+
+    def on_event_start(self, event_type, payload=None, event_id: str = "", parent_id: str = "", **kwargs):
+        self.timings[event_id] = time.time()
+
+    def on_event_end(self, event_type, payload=None, event_id: str = "", parent_id: str = "", **kwargs):
+        if event_id in self.timings:
+            duration = time.time() - self.timings.pop(event_id)
+            if event_type == CBEventType.EMBEDDING:
+                logging.info(f"Embedding generation took: {duration:.2f} seconds")
+            elif event_type == CBEventType.LLM:
+                logging.info(f"LLM call took: {duration:.2f} seconds")
+            elif event_type == CBEventType.QUERY:
+                logging.info(f"Query processing took: {duration:.2f} seconds")
+            elif event_type == CBEventType.RETRIEVE:
+                logging.info(f"Retrieval took: {duration:.2f} seconds")
+            elif event_type == CBEventType.SYNTHESIZE:
+                logging.info(f"Synthesis took: {duration:.2f} seconds")
+
+    def start_trace(self, trace_id: str | None = None) -> None:
+        pass
+
+    def end_trace(
+        self,
+        trace_id: str | None = None,
+        trace_map: dict[str, list[str]] | None = None,
+    ) -> None:
+        pass
 
 # Load environment variables
 load_dotenv()
@@ -18,6 +56,11 @@ class AppSettings(BaseSettings):
     HUGGINGFACE_EMBEDDING_MODEL_NAME: str = "BAAI/bge-large-en-v1.5"
 
 settings = AppSettings()
+
+# Set up the callback manager
+timing_handler = TimingCallbackHandler()
+callback_manager = CallbackManager([timing_handler])
+Settings.callback_manager = callback_manager
 
 st.title("📄 LlamaIndex Chatbot")
 
@@ -31,32 +74,46 @@ with st.sidebar:
     st.header("Model Status")
     # Function to handle model loading with progress bars
     def initialize_models():
+        logging.info("Initializing models...")
+        start_time = time.time()
         if "llm" not in st.session_state:
             st.write("Initializing models...")
             
             progress_bar = st.progress(0, text="Loading LLM...")
             try:
+                logging.info("Loading LLM...")
+                llm_start_time = time.time()
                 st.session_state.llm = Ollama(
                     model=settings.LLAMA_MODEL_NAME,
                     request_timeout=360.0,
                     context_window=8000,
                 )
                 Settings.llm = st.session_state.llm
+                llm_end_time = time.time()
+                logging.info(f"LLM loaded in {llm_end_time - llm_start_time:.2f} seconds.")
                 progress_bar.progress(50, text="LLM loaded. Loading embedding model...")
             except Exception as e:
+                logging.error(f"Failed to load LLM: {e}")
                 st.error(f"Failed to load LLM: {e}")
                 st.stop()
 
             try:
+                logging.info("Loading embedding model...")
+                embed_start_time = time.time()
                 st.session_state.embed_model = HuggingFaceEmbedding(model_name=settings.HUGGINGFACE_EMBEDDING_MODEL_NAME)
                 Settings.embed_model = st.session_state.embed_model
+                embed_end_time = time.time()
+                logging.info(f"Embedding model loaded in {embed_end_time - embed_start_time:.2f} seconds.")
                 progress_bar.progress(100, text="All models loaded successfully!")
                 time.sleep(2) # Give user time to read the success message
                 progress_bar.empty()
                 st.rerun() # Rerun to clear the progress bar and messages
             except Exception as e:
+                logging.error(f"Failed to load embedding model: {e}")
                 st.error(f"Failed to load embedding model: {e}")
                 st.stop()
+        end_time = time.time()
+        logging.info(f"Model initialization finished in {end_time - start_time:.2f} seconds.")
 
     # Initialize models if they are not in session state
     if "llm" not in st.session_state or "embed_model" not in st.session_state:
@@ -93,6 +150,8 @@ with st.sidebar:
                 st.warning("Please select at least one file to build an index.")
             else:
                 with st.spinner("Building index... This may take a while!"):
+                    logging.info("Building index...")
+                    start_time = time.time()
                     input_files = [os.path.join("data", f) for f in selected_files_for_indexing]
                     documents = SimpleDirectoryReader(input_files=input_files).load_data()
                     
@@ -106,6 +165,8 @@ with st.sidebar:
                         
                         index_dir = os.path.join("indexes", index_name_input)
                         index.storage_context.persist(persist_dir=index_dir)
+                        end_time = time.time()
+                        logging.info(f"Index '{index_name_input}' built and saved in {end_time - start_time:.2f} seconds.")
                         st.success(f"Index '{index_name_input}' built and saved to '{index_dir}'")
 
     st.header("Select Index")
@@ -117,13 +178,18 @@ with st.sidebar:
         selected_index_name = st.selectbox("Choose an index", available_indexes)
         if st.button("Load Index"):
             with st.spinner(f"Loading index '{selected_index_name}'..."):
+                logging.info(f"Loading index '{selected_index_name}'...")
+                start_time = time.time()
                 try:
                     storage_context = StorageContext.from_defaults(persist_dir=os.path.join("indexes", selected_index_name))
                     index = load_index_from_storage(storage_context)
                     st.session_state.loaded_index = index
+                    end_time = time.time()
+                    logging.info(f"Index '{selected_index_name}' loaded in {end_time - start_time:.2f} seconds.")
                     st.success(f"Index '{selected_index_name}' loaded successfully!")
                     st.rerun()
                 except Exception as e:
+                    logging.error(f"Error loading index: {e}")
                     st.error(f"Error loading index: {e}")
 
     st.header("Chat History")
@@ -161,15 +227,20 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
     else:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                start_time = time.time() # Start timer
+                logging.info("Generating chat response...")
+                start_time = time.time() # Start timer for user-facing total time
+                
                 chat_engine = st.session_state.loaded_index.as_chat_engine(
                     chat_mode=ChatMode.CONDENSE_QUESTION,
                     verbose=True,
                     llm=st.session_state.llm,
                 )
+                
                 response = chat_engine.chat(st.session_state.messages[-1]["content"])
+                
                 end_time = time.time() # End timer
                 response_time = round(end_time - start_time, 2) # Calculate response time
+                logging.info(f"Total chat response generated in {response_time:.2f} seconds.")
 
                 full_response_content = f"{response.response}\n\n(Response time: {response_time} seconds)"
                 st.session_state.messages.append({"role": "assistant", "content": full_response_content})
