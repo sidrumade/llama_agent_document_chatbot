@@ -5,7 +5,17 @@ import time
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, StorageContext, load_index_from_storage
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
-from llama_index.core.chat_engine import SimpleChatEngine
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
+
+# Load environment variables
+load_dotenv()
+
+class AppSettings(BaseSettings):
+    LLAMA_MODEL_NAME: str = "llama3.2:latest"
+    HUGGINGFACE_EMBEDDING_MODEL_NAME: str = "BAAI/bge-large-en-v1.5"
+
+settings = AppSettings()
 
 st.title("📄 LlamaIndex Chatbot")
 
@@ -19,14 +29,14 @@ if not os.path.exists("indexes"):
 @st.cache_resource
 def load_llm():
     return Ollama(
-        model="llama3.2:latest",
+        model=settings.LLAMA_MODEL_NAME,
         request_timeout=360.0,
         context_window=8000,
     )
 
 @st.cache_resource
 def load_embed_model():
-    return HuggingFaceEmbedding(model_name="BAAI/bge-large-en-v1.5")
+    return HuggingFaceEmbedding(model_name=settings.HUGGINGFACE_EMBEDDING_MODEL_NAME)
 
 Settings.llm = load_llm()
 Settings.embed_model = load_embed_model()
