@@ -25,40 +25,50 @@ if not os.path.exists("data"):
 if not os.path.exists("indexes"):
     os.makedirs("indexes")
 
-# Function to handle model loading with progress bars
-def initialize_models():
-    if "llm" not in st.session_state:
-        st.write("Initializing models...")
-        
-        progress_bar = st.progress(0, text="Loading LLM...")
-        try:
-            st.session_state.llm = Ollama(
-                model=settings.LLAMA_MODEL_NAME,
-                request_timeout=360.0,
-                context_window=8000,
-            )
-            Settings.llm = st.session_state.llm
-            progress_bar.progress(50, text="LLM loaded. Loading embedding model...")
-        except Exception as e:
-            st.error(f"Failed to load LLM: {e}")
-            st.stop()
-
-        try:
-            st.session_state.embed_model = HuggingFaceEmbedding(model_name=settings.HUGGINGFACE_EMBEDDING_MODEL_NAME)
-            Settings.embed_model = st.session_state.embed_model
-            progress_bar.progress(100, text="All models loaded successfully!")
-            time.sleep(2) # Give user time to read the success message
-            progress_bar.empty()
-            st.rerun() # Rerun to clear the progress bar and messages
-        except Exception as e:
-            st.error(f"Failed to load embedding model: {e}")
-            st.stop()
-
-# Initialize models if they are not in session state
-if "llm" not in st.session_state or "embed_model" not in st.session_state:
-    initialize_models()
-
 with st.sidebar:
+    st.header("Model Status")
+    # Function to handle model loading with progress bars
+    def initialize_models():
+        if "llm" not in st.session_state:
+            st.write("Initializing models...")
+            
+            progress_bar = st.progress(0, text="Loading LLM...")
+            try:
+                st.session_state.llm = Ollama(
+                    model=settings.LLAMA_MODEL_NAME,
+                    request_timeout=360.0,
+                    context_window=8000,
+                )
+                Settings.llm = st.session_state.llm
+                progress_bar.progress(50, text="LLM loaded. Loading embedding model...")
+            except Exception as e:
+                st.error(f"Failed to load LLM: {e}")
+                st.stop()
+
+            try:
+                st.session_state.embed_model = HuggingFaceEmbedding(model_name=settings.HUGGINGFACE_EMBEDDING_MODEL_NAME)
+                Settings.embed_model = st.session_state.embed_model
+                progress_bar.progress(100, text="All models loaded successfully!")
+                time.sleep(2) # Give user time to read the success message
+                progress_bar.empty()
+                st.rerun() # Rerun to clear the progress bar and messages
+            except Exception as e:
+                st.error(f"Failed to load embedding model: {e}")
+                st.stop()
+
+    # Initialize models if they are not in session state
+    if "llm" not in st.session_state or "embed_model" not in st.session_state:
+        initialize_models()
+    else:
+        st.markdown("Status: <span style='color:green'>●</span> Models Loaded", unsafe_allow_html=True)
+
+    st.header("Index Status")
+    # Index loaded indicator
+    if "loaded_index" in st.session_state:
+        st.markdown("Status: <span style='color:green'>●</span> Index Loaded", unsafe_allow_html=True)
+    else:
+        st.markdown("Status: <span style='color:red'>●</span> No Index Loaded", unsafe_allow_html=True)
+
     with st.expander("Upload & Build Index", expanded=True):
         st.header("Upload Documents")
         uploaded_files = st.file_uploader("Choose files", accept_multiple_files=True, type=["pdf", "txt", "docx"])
@@ -97,13 +107,6 @@ with st.sidebar:
                         st.success(f"Index '{index_name_input}' built and saved to '{index_dir}'")
 
     st.header("Select Index")
-    
-    # Index loaded indicator
-    if "loaded_index" in st.session_state:
-        st.markdown("Status: <span style='color:green'>●</span> Index Loaded", unsafe_allow_html=True)
-    else:
-        st.markdown("Status: <span style='color:red'>●</span> No Index Loaded", unsafe_allow_html=True)
-
     available_indexes = [d for d in os.listdir("indexes") if os.path.isdir(os.path.join("indexes", d))]
     
     if not available_indexes:
@@ -135,8 +138,16 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+# Inform user if models are not loaded
+if "llm" not in st.session_state:
+    st.info("Models are initializing in the sidebar. Please wait...")
+
 # Chat input and response generation
-if prompt := st.chat_input("Ask a question about the documents..."):
+models_loaded = "llm" in st.session_state
+if prompt := st.chat_input(
+    "Ask a question about the documents...", 
+    disabled=not models_loaded
+):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.rerun()
 
