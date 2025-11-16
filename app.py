@@ -7,6 +7,8 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+from llama_index.core.chat_engine.types import ChatMode
+
 
 # Load environment variables
 load_dotenv()
@@ -161,7 +163,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
             with st.spinner("Thinking..."):
                 start_time = time.time() # Start timer
                 chat_engine = st.session_state.loaded_index.as_chat_engine(
-                    chat_mode="condense_question",
+                    chat_mode=ChatMode.CONDENSE_QUESTION,
                     verbose=True,
                     llm=st.session_state.llm,
                 )
