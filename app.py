@@ -3,17 +3,34 @@ import os
 from datetime import datetime
 import time
 import logging
+import yaml
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, StorageContext, load_index_from_storage
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
-from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
 from llama_index.core.callbacks import CallbackManager, CBEventType
 from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 from llama_index.core.chat_engine.types import ChatMode
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Configuration Loading ---
+def load_config():
+    """Loads configuration from config.yaml."""
+    try:
+        with open("config.yaml", "r") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        st.error("config.yaml not found. Please make sure it exists.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Error loading config.yaml: {e}")
+        st.stop()
+
+config = load_config()
+LLAMA_MODEL_NAME = config.get("llm_model_name", "default_llm_model")
+HUGGINGFACE_EMBEDDING_MODEL_NAME = config.get("embedding_model_name", "default_embedding_model")
+# --- End Configuration Loading ---
 
 # Define the custom callback handler for timing
 class TimingCallbackHandler(BaseCallbackHandler):
@@ -48,15 +65,6 @@ class TimingCallbackHandler(BaseCallbackHandler):
     ) -> None:
         pass
 
-# Load environment variables
-load_dotenv()
-
-class AppSettings(BaseSettings):
-    LLAMA_MODEL_NAME: str = "llama3.2:latest"
-    HUGGINGFACE_EMBEDDING_MODEL_NAME: str = "BAAI/bge-large-en-v1.5"
-
-settings = AppSettings()
-
 # Set up the callback manager
 timing_handler = TimingCallbackHandler()
 callback_manager = CallbackManager([timing_handler])
@@ -84,7 +92,7 @@ with st.sidebar:
                 logging.info("Loading LLM...")
                 llm_start_time = time.time()
                 st.session_state.llm = Ollama(
-                    model=settings.LLAMA_MODEL_NAME,
+                    model=LLAMA_MODEL_NAME,
                     request_timeout=360.0,
                     context_window=8000,
                 )
@@ -100,7 +108,7 @@ with st.sidebar:
             try:
                 logging.info("Loading embedding model...")
                 embed_start_time = time.time()
-                st.session_state.embed_model = HuggingFaceEmbedding(model_name=settings.HUGGINGFACE_EMBEDDING_MODEL_NAME)
+                st.session_state.embed_model = HuggingFaceEmbedding(model_name=HUGGINGFACE_EMBEDDING_MODEL_NAME)
                 Settings.embed_model = st.session_state.embed_model
                 embed_end_time = time.time()
                 logging.info(f"Embedding model loaded in {embed_end_time - embed_start_time:.2f} seconds.")

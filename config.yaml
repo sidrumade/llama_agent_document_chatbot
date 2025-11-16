@@ -1,0 +1,2 @@
+llm_model_name: "llama3.2:latest"
+embedding_model_name: "BAAI/bge-large-en-v1.5"
