@@ -25,21 +25,38 @@ if not os.path.exists("data"):
 if not os.path.exists("indexes"):
     os.makedirs("indexes")
 
-# Initialize LLM and Embedding Model
-@st.cache_resource
-def load_llm():
-    return Ollama(
-        model=settings.LLAMA_MODEL_NAME,
-        request_timeout=360.0,
-        context_window=8000,
-    )
+# Function to handle model loading with progress bars
+def initialize_models():
+    if "llm" not in st.session_state:
+        st.write("Initializing models...")
+        
+        progress_bar = st.progress(0, text="Loading LLM...")
+        try:
+            st.session_state.llm = Ollama(
+                model=settings.LLAMA_MODEL_NAME,
+                request_timeout=360.0,
+                context_window=8000,
+            )
+            Settings.llm = st.session_state.llm
+            progress_bar.progress(50, text="LLM loaded. Loading embedding model...")
+        except Exception as e:
+            st.error(f"Failed to load LLM: {e}")
+            st.stop()
 
-@st.cache_resource
-def load_embed_model():
-    return HuggingFaceEmbedding(model_name=settings.HUGGINGFACE_EMBEDDING_MODEL_NAME)
+        try:
+            st.session_state.embed_model = HuggingFaceEmbedding(model_name=settings.HUGGINGFACE_EMBEDDING_MODEL_NAME)
+            Settings.embed_model = st.session_state.embed_model
+            progress_bar.progress(100, text="All models loaded successfully!")
+            time.sleep(2) # Give user time to read the success message
+            progress_bar.empty()
+            st.rerun() # Rerun to clear the progress bar and messages
+        except Exception as e:
+            st.error(f"Failed to load embedding model: {e}")
+            st.stop()
 
-Settings.llm = load_llm()
-Settings.embed_model = load_embed_model()
+# Initialize models if they are not in session state
+if "llm" not in st.session_state or "embed_model" not in st.session_state:
+    initialize_models()
 
 with st.sidebar:
     with st.expander("Upload & Build Index", expanded=True):
@@ -135,7 +152,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
                 chat_engine = st.session_state.loaded_index.as_chat_engine(
                     chat_mode="condense_question",
                     verbose=True,
-                    llm=Settings.llm,
+                    llm=st.session_state.llm,
                 )
                 response = chat_engine.chat(st.session_state.messages[-1]["content"])
                 end_time = time.time() # End timer
