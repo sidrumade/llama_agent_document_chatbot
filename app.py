@@ -28,8 +28,8 @@ def load_config():
         st.stop()
 
 config = load_config()
-LLAMA_MODEL_NAME = config.get("llm_model_name", "default_llm_model")
-HUGGINGFACE_EMBEDDING_MODEL_NAME = config.get("embedding_model_name", "default_embedding_model")
+LLAMA_MODEL_NAME = config.get("llm_model_name", "llama3.2:latest")
+HUGGINGFACE_EMBEDDING_MODEL_NAME = config.get("embedding_model_name", "BAAI/bge-large-en-v1.5")
 # --- End Configuration Loading ---
 
 # Define the custom callback handler for timing
