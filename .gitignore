@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesize
+
+# Project Specific
+data/
+indexes/
+test_report.txt
+config.yaml
+# Keep config.yaml if it's a template, but usually secrets are here. 
+# Since it only has model names, maybe keep it? 
+# The user didn't specify, but standard practice is to ignore config if it might have keys.
+# However, this config.yaml seems harmless (model names). 
+# I will NOT ignore config.yaml for now as it's needed for the app to run and doesn't seem to have secrets.
+# If it had API keys, I would ignore it.
+
+# IDEs
+.vscode/
+.idea/

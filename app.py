@@ -81,21 +81,31 @@ if not os.path.exists("indexes"):
 with st.sidebar:
     st.header("Model Status")
     # Function to handle model loading with progress bars
+    @st.cache_resource
+    def load_llm():
+        logging.info("Loading LLM...")
+        return Ollama(
+            model=LLAMA_MODEL_NAME,
+            request_timeout=360.0,
+            context_window=8000,
+        )
+
+    @st.cache_resource
+    def load_embedding_model():
+        logging.info("Loading embedding model...")
+        return HuggingFaceEmbedding(model_name=HUGGINGFACE_EMBEDDING_MODEL_NAME)
+
     def initialize_models():
         logging.info("Initializing models...")
         start_time = time.time()
-        if "llm" not in st.session_state:
+        
+        if "llm" not in st.session_state or "embed_model" not in st.session_state:
             st.write("Initializing models...")
-            
             progress_bar = st.progress(0, text="Loading LLM...")
+            
             try:
-                logging.info("Loading LLM...")
                 llm_start_time = time.time()
-                st.session_state.llm = Ollama(
-                    model=LLAMA_MODEL_NAME,
-                    request_timeout=360.0,
-                    context_window=8000,
-                )
+                st.session_state.llm = load_llm()
                 Settings.llm = st.session_state.llm
                 llm_end_time = time.time()
                 logging.info(f"LLM loaded in {llm_end_time - llm_start_time:.2f} seconds.")
@@ -106,20 +116,20 @@ with st.sidebar:
                 st.stop()
 
             try:
-                logging.info("Loading embedding model...")
                 embed_start_time = time.time()
-                st.session_state.embed_model = HuggingFaceEmbedding(model_name=HUGGINGFACE_EMBEDDING_MODEL_NAME)
+                st.session_state.embed_model = load_embedding_model()
                 Settings.embed_model = st.session_state.embed_model
                 embed_end_time = time.time()
                 logging.info(f"Embedding model loaded in {embed_end_time - embed_start_time:.2f} seconds.")
                 progress_bar.progress(100, text="All models loaded successfully!")
-                time.sleep(2) # Give user time to read the success message
+                time.sleep(1) 
                 progress_bar.empty()
-                st.rerun() # Rerun to clear the progress bar and messages
+                st.rerun()
             except Exception as e:
                 logging.error(f"Failed to load embedding model: {e}")
                 st.error(f"Failed to load embedding model: {e}")
                 st.stop()
+        
         end_time = time.time()
         logging.info(f"Model initialization finished in {end_time - start_time:.2f} seconds.")
 
@@ -239,17 +249,20 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
                 start_time = time.time() # Start timer for user-facing total time
                 
                 chat_engine = st.session_state.loaded_index.as_chat_engine(
-                    chat_mode=ChatMode.CONDENSE_QUESTION,
+                    chat_mode=ChatMode.CONTEXT,
                     verbose=True,
                     llm=st.session_state.llm,
                 )
                 
-                response = chat_engine.chat(st.session_state.messages[-1]["content"])
+                # Streaming Response
+                response_stream = chat_engine.stream_chat(st.session_state.messages[-1]["content"])
+                full_response = st.write_stream(response_stream.response_gen)
                 
                 end_time = time.time() # End timer
                 response_time = round(end_time - start_time, 2) # Calculate response time
                 logging.info(f"Total chat response generated in {response_time:.2f} seconds.")
 
-                full_response_content = f"{response.response}\n\n(Response time: {response_time} seconds)"
-                st.session_state.messages.append({"role": "assistant", "content": full_response_content})
-                st.rerun()
+                # Append full response to history with timing info (optional, maybe just log it or append to the message invisibly)
+                # For now, just appending the content. The timing info is in the logs.
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+                # No need to rerun, st.write_stream handles the display, and we appended to state for next run.
