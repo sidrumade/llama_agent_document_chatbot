@@ -1,15 +1,28 @@
 import streamlit as st
 import os
-from datetime import datetime
 import time
 import logging
 import yaml
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, StorageContext, load_index_from_storage
+from datetime import datetime
+import asyncio
+import nest_asyncio
+from dotenv import load_dotenv
+
+# Apply nest_asyncio to support nested event loops in Streamlit
+nest_asyncio.apply()
+
+from llama_index.core import Settings, SimpleDirectoryReader, StorageContext
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
+from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.callbacks import CallbackManager, CBEventType
 from llama_index.core.callbacks.base_handler import BaseCallbackHandler
-from llama_index.core.chat_engine.types import ChatMode
+
+# Import from our new RAG engine
+from rag_engine import IndexManager, RefinedAgenticWorkflow, PlanStepEvent, RetrievalStepEvent, PostprocessStepEvent, TextChunkEvent
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,8 +41,11 @@ def load_config():
         st.stop()
 
 config = load_config()
-LLAMA_MODEL_NAME = config.get("llm_model_name", "llama3.2:latest")
-HUGGINGFACE_EMBEDDING_MODEL_NAME = config.get("embedding_model_name", "BAAI/bge-large-en-v1.5")
+LLM_PROVIDER = config.get("llm_provider", "ollama")
+LLM_MODEL_NAME = config.get("llm_model_name", "models/gemini-2.5-flash")
+LLM_PLANNER_MODEL_NAME = config.get("llm_planner_model_name", "models/gemini-2.5-flash")
+HUGGINGFACE_EMBEDDING_MODEL_NAME = config.get("embedding_model_name", "BAAI/bge-small-en-v1.5")
+RERANKER_MODEL_NAME = config.get("reranker_model_name", "BAAI/bge-reranker-base")
 # --- End Configuration Loading ---
 
 # Define the custom callback handler for timing
@@ -58,11 +74,7 @@ class TimingCallbackHandler(BaseCallbackHandler):
     def start_trace(self, trace_id: str | None = None) -> None:
         pass
 
-    def end_trace(
-        self,
-        trace_id: str | None = None,
-        trace_map: dict[str, list[str]] | None = None,
-    ) -> None:
+    def end_trace(self, trace_id: str | None = None, trace_map: dict[str, list[str]] | None = None) -> None:
         pass
 
 # Set up the callback manager
@@ -80,36 +92,95 @@ if not os.path.exists("indexes"):
 
 with st.sidebar:
     st.header("Model Status")
+
+    # Handle Gemini API Key sidebar input/loading
+    env_api_key = os.environ.get("GEMINI_API_KEY", "")
+    gemini_api_key = st.session_state.get("gemini_api_key", env_api_key)
+
+    if LLM_PROVIDER == "gemini":
+        st.subheader("API Configuration")
+        user_api_key = st.text_input(
+            "Enter Gemini API Key:",
+            type="password",
+            value=gemini_api_key,
+            help="Get your API key from Google AI Studio"
+        )
+        if user_api_key:
+            st.session_state.gemini_api_key = user_api_key
+            gemini_api_key = user_api_key
+
+        # If the API key in session state changes, clear the cached LLMs
+        if "loaded_api_key" not in st.session_state:
+            st.session_state.loaded_api_key = gemini_api_key
+        elif st.session_state.loaded_api_key != gemini_api_key:
+            st.session_state.loaded_api_key = gemini_api_key
+            if "llm" in st.session_state:
+                del st.session_state.llm
+            if "planner_llm" in st.session_state:
+                del st.session_state.planner_llm
+            st.rerun()
+
     # Function to handle model loading with progress bars
     @st.cache_resource
-    def load_llm():
-        logging.info("Loading LLM...")
-        return Ollama(
-            model=LLAMA_MODEL_NAME,
-            request_timeout=360.0,
-            context_window=8000,
-        )
+    def load_llm(provider, model_name, api_key=None):
+        logging.info(f"Loading LLM ({provider} - {model_name})...")
+        if provider == "gemini":
+            if not api_key:
+                raise ValueError("Gemini API key is required but missing.")
+            return GoogleGenAI(
+                model=model_name,
+                api_key=api_key,
+                context_window=1000000,
+                max_tokens=8192
+            )
+        else:
+            return Ollama(
+                model=model_name,
+                request_timeout=360.0,
+                context_window=8000,
+            )
 
     @st.cache_resource
     def load_embedding_model():
         logging.info("Loading embedding model...")
         return HuggingFaceEmbedding(model_name=HUGGINGFACE_EMBEDDING_MODEL_NAME)
 
+    @st.cache_resource
+    def load_reranker(model_name):
+        logging.info(f"Loading reranker model {model_name}...")
+        from llama_index.core.postprocessor import SentenceTransformerRerank
+        return SentenceTransformerRerank(
+            model=model_name,
+            top_n=5
+        )
+
     def initialize_models():
         logging.info("Initializing models...")
         start_time = time.time()
         
-        if "llm" not in st.session_state or "embed_model" not in st.session_state:
+        needs_loading = (
+            "llm" not in st.session_state or 
+            "planner_llm" not in st.session_state or 
+            "embed_model" not in st.session_state or 
+            "reranker" not in st.session_state
+        )
+        
+        if needs_loading:
             st.write("Initializing models...")
-            progress_bar = st.progress(0, text="Loading LLM...")
+            progress_bar = st.progress(0, text="Loading Synthesis LLM...")
             
             try:
                 llm_start_time = time.time()
-                st.session_state.llm = load_llm()
+                # Load primary synthesis LLM
+                st.session_state.llm = load_llm(LLM_PROVIDER, LLM_MODEL_NAME, gemini_api_key)
                 Settings.llm = st.session_state.llm
+                
+                # Load planning LLM
+                st.session_state.planner_llm = load_llm(LLM_PROVIDER, LLM_PLANNER_MODEL_NAME, gemini_api_key)
+                
                 llm_end_time = time.time()
-                logging.info(f"LLM loaded in {llm_end_time - llm_start_time:.2f} seconds.")
-                progress_bar.progress(50, text="LLM loaded. Loading embedding model...")
+                logging.info(f"LLMs loaded in {llm_end_time - llm_start_time:.2f} seconds.")
+                progress_bar.progress(33, text="LLMs loaded. Loading embedding model...")
             except Exception as e:
                 logging.error(f"Failed to load LLM: {e}")
                 st.error(f"Failed to load LLM: {e}")
@@ -121,28 +192,62 @@ with st.sidebar:
                 Settings.embed_model = st.session_state.embed_model
                 embed_end_time = time.time()
                 logging.info(f"Embedding model loaded in {embed_end_time - embed_start_time:.2f} seconds.")
+                progress_bar.progress(66, text="Embedding model loaded. Loading reranker...")
+            except Exception as e:
+                logging.error(f"Failed to load embedding model: {e}")
+                st.error(f"Failed to load embedding model: {e}")
+                st.stop()
+
+            try:
+                reranker_start_time = time.time()
+                st.session_state.reranker = load_reranker(RERANKER_MODEL_NAME)
+                reranker_end_time = time.time()
+                logging.info(f"Reranker loaded in {reranker_end_time - reranker_start_time:.2f} seconds.")
                 progress_bar.progress(100, text="All models loaded successfully!")
                 time.sleep(1) 
                 progress_bar.empty()
                 st.rerun()
             except Exception as e:
-                logging.error(f"Failed to load embedding model: {e}")
-                st.error(f"Failed to load embedding model: {e}")
+                logging.error(f"Failed to load reranker: {e}")
+                st.error(f"Failed to load reranker: {e}")
                 st.stop()
         
         end_time = time.time()
         logging.info(f"Model initialization finished in {end_time - start_time:.2f} seconds.")
 
     # Initialize models if they are not in session state
-    if "llm" not in st.session_state or "embed_model" not in st.session_state:
-        initialize_models()
+    if "llm" not in st.session_state or "embed_model" not in st.session_state or "reranker" not in st.session_state:
+        if LLM_PROVIDER == "gemini" and not gemini_api_key:
+            st.info("Please enter your Gemini API Key in the configuration section above to proceed.")
+        else:
+            initialize_models()
     else:
         st.markdown("Status: <span style='color:green'>●</span> Models Loaded", unsafe_allow_html=True)
 
+    st.header("Retrieval Settings")
+    query_fusion_queries = st.slider(
+        "Query Fusion Variations",
+        min_value=1,
+        max_value=5,
+        value=config.get("query_fusion_queries", 3),
+        help="Number of query variations to generate for hybrid fusion search."
+    )
+    enable_auto_merging = st.toggle(
+        "Enable Auto-Merging Context",
+        value=config.get("enable_auto_merging", True),
+        help="Automatically merge retrieved child chunks into parent sections when beneficial."
+    )
+    enable_context_compression = st.toggle(
+        "Enable Context Compression",
+        value=config.get("enable_context_compression", True),
+        help="Use the LLM to extract only relevant sentences from retrieved chunks."
+    )
+
     st.header("Index Status")
     # Index loaded indicator
-    if "loaded_index" in st.session_state:
-        st.markdown("Status: <span style='color:green'>●</span> Index Loaded", unsafe_allow_html=True)
+    if "loaded_index_dict" in st.session_state:
+        idx_type = st.session_state.loaded_index_dict.get("type", "legacy")
+        st.markdown(f"Status: <span style='color:green'>●</span> Index Loaded ({idx_type.capitalize()})", unsafe_allow_html=True)
     else:
         st.markdown("Status: <span style='color:red'>●</span> No Index Loaded", unsafe_allow_html=True)
 
@@ -157,8 +262,6 @@ with st.sidebar:
                 st.success(f"Saved {uploaded_file.name} to data/")
 
         st.header("Build Index")
-        
-        # File selection for indexing
         files_in_data_dir = [f for f in os.listdir("data") if os.path.isfile(os.path.join("data", f))]
         selected_files_for_indexing = st.multiselect("Select files to index:", files_in_data_dir)
 
@@ -166,9 +269,11 @@ with st.sidebar:
         if st.button("Build Index"):
             if not selected_files_for_indexing:
                 st.warning("Please select at least one file to build an index.")
+            elif "llm" not in st.session_state:
+                st.warning("Please configure and load models before building an index.")
             else:
-                with st.spinner("Building index... This may take a while!"):
-                    logging.info("Building index...")
+                with st.spinner("Building multi-layer index... This may take a while as summaries are generated!"):
+                    logging.info("Building multi-layer index...")
                     start_time = time.time()
                     input_files = [os.path.join("data", f) for f in selected_files_for_indexing]
                     documents = SimpleDirectoryReader(input_files=input_files).load_data()
@@ -176,16 +281,24 @@ with st.sidebar:
                     if not documents:
                         st.warning("Could not load any documents from the selected files.")
                     else:
-                        index = VectorStoreIndex.from_documents(documents)
-                        
                         if not index_name_input:
                             index_name_input = datetime.now().strftime("%Y%m%d_%H%M%S")
                         
-                        index_dir = os.path.join("indexes", index_name_input)
-                        index.storage_context.persist(persist_dir=index_dir)
+                        index_dict = IndexManager.build_multi_index(
+                            documents,
+                            index_name_input,
+                            st.session_state.llm,
+                            st.session_state.embed_model
+                        )
+                        st.session_state.loaded_index_dict = index_dict
+                        
+                        # Preserve legacy reference for backward compatibility
+                        st.session_state.loaded_index = index_dict["hierarchical"]
+                        
                         end_time = time.time()
-                        logging.info(f"Index '{index_name_input}' built and saved in {end_time - start_time:.2f} seconds.")
-                        st.success(f"Index '{index_name_input}' built and saved to '{index_dir}'")
+                        logging.info(f"Multi-index '{index_name_input}' built and saved in {end_time - start_time:.2f} seconds.")
+                        st.success(f"Multi-index '{index_name_input}' built successfully!")
+                        st.rerun()
 
     st.header("Select Index")
     available_indexes = [d for d in os.listdir("indexes") if os.path.isdir(os.path.join("indexes", d))]
@@ -199,9 +312,15 @@ with st.sidebar:
                 logging.info(f"Loading index '{selected_index_name}'...")
                 start_time = time.time()
                 try:
-                    storage_context = StorageContext.from_defaults(persist_dir=os.path.join("indexes", selected_index_name))
-                    index = load_index_from_storage(storage_context)
-                    st.session_state.loaded_index = index
+                    index_dict = IndexManager.load_index(selected_index_name, st.session_state.embed_model)
+                    st.session_state.loaded_index_dict = index_dict
+                    
+                    # Backward compatibility fallback
+                    if index_dict["type"] == "multi":
+                        st.session_state.loaded_index = index_dict["hierarchical"]
+                    else:
+                        st.session_state.loaded_index = index_dict["index"]
+                        
                     end_time = time.time()
                     logging.info(f"Index '{selected_index_name}' loaded in {end_time - start_time:.2f} seconds.")
                     st.success(f"Index '{selected_index_name}' loaded successfully!")
@@ -223,6 +342,12 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if "citations" in message:
+            with st.expander("📚 Sources Cited", expanded=False):
+                for cite in message["citations"]:
+                    st.markdown(
+                        f"**[{cite['index']}] {cite['filename']}** (Page {cite['page_number']}, Section: `{cite['section']}`) — *Relevance: {cite['confidence']}%*"
+                    )
 
 # Inform user if models are not loaded
 if "llm" not in st.session_state:
@@ -239,30 +364,87 @@ if prompt := st.chat_input(
 
 # Generate assistant response if the last message is from the user
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
-    if "loaded_index" not in st.session_state:
+    if "loaded_index_dict" not in st.session_state:
         with st.chat_message("assistant"):
             st.warning("Please load an index first from the sidebar.")
     else:
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                logging.info("Generating chat response...")
-                start_time = time.time() # Start timer for user-facing total time
-                
-                chat_engine = st.session_state.loaded_index.as_chat_engine(
-                    chat_mode=ChatMode.CONTEXT,
-                    verbose=True,
-                    llm=st.session_state.llm,
-                )
-                
-                # Streaming Response
-                response_stream = chat_engine.stream_chat(st.session_state.messages[-1]["content"])
-                full_response = st.write_stream(response_stream.response_gen)
-                
-                end_time = time.time() # End timer
-                response_time = round(end_time - start_time, 2) # Calculate response time
-                logging.info(f"Total chat response generated in {response_time:.2f} seconds.")
+            # Execute Agentic RAG Workflow
+            logging.info("Executing Agentic RAG Workflow...")
+            start_time = time.time()
+            
+            wf_settings = {
+                "query_fusion_queries": query_fusion_queries,
+                "enable_auto_merging": enable_auto_merging,
+                "enable_context_compression": enable_context_compression
+            }
+            
+            # Setup workflow
+            workflow = RefinedAgenticWorkflow(
+                index_dict=st.session_state.loaded_index_dict,
+                llm=st.session_state.llm,
+                embed_model=st.session_state.embed_model,
+                reranker=st.session_state.reranker,
+                settings=wf_settings
+            )
+            
+            # Inject planner LLM
+            workflow.llm = st.session_state.planner_llm
+            
+            # Streaming Output Block
+            message_placeholder = st.empty()
+            state = {"full_response": "", "citations_data": []}
+            
+            async def run_workflow_stream():
+                user_query = st.session_state.messages[-1]["content"]
+                handler = workflow.run(query=user_query)
+                async for event in handler.stream_events():
+                    if isinstance(event, PlanStepEvent):
+                        logging.info(f"Query Plan: {event.reasoning}")
+                        logging.info(f"- Strategy: {event.strategy}")
+                        logging.info(f"- Sub-queries: {event.sub_queries}")
+                        if event.metadata_filters:
+                            logging.info(f"- Filters: {event.metadata_filters}")
+                    elif isinstance(event, RetrievalStepEvent):
+                        logging.info(f"Retrieval: Found {event.num_nodes} chunks using {event.strategy} search.")
+                    elif isinstance(event, PostprocessStepEvent):
+                        logging.info(f"Processing: {event.msg}")
+                    elif isinstance(event, TextChunkEvent):
+                        state["full_response"] += event.text
+                        message_placeholder.markdown(state["full_response"] + "▌")
+                        
+                # Retrieve final response block
+                result = await handler
+                state["citations_data"] = result.get("citations", [])
+                # The final response generation yields using TextChunkEvent, but we assign final result
+                return result.get("response", "")
 
-                # Append full response to history with timing info (optional, maybe just log it or append to the message invisibly)
-                # For now, just appending the content. The timing info is in the logs.
-                st.session_state.messages.append({"role": "assistant", "content": full_response})
-                # No need to rerun, st.write_stream handles the display, and we appended to state for next run.
+            try:
+                # Run the asynchronous loop synchronously in Streamlit
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                final_txt = loop.run_until_complete(run_workflow_stream())
+                
+                # Render final text without cursor
+                message_placeholder.markdown(final_txt)
+                
+                # Store final text and citations in chat history
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": final_txt,
+                    "citations": state["citations_data"]
+                })
+                
+                if state["citations_data"]:
+                    with st.expander("📚 Sources Cited", expanded=False):
+                        for cite in state["citations_data"]:
+                            st.markdown(
+                                f"**[{cite['index']}] {cite['filename']}** (Page {cite['page_number']}, Section: `{cite['section']}`) — *Relevance: {cite['confidence']}%*"
+                            )
+            except Exception as e:
+                logging.error(f"Error executing agentic workflow: {e}", exc_info=True)
+                st.error(f"Error executing agentic workflow: {e}")
+                st.stop()
+            
+            end_time = time.time()
+            logging.info(f"Total response generated in {end_time - start_time:.2f} seconds.")

@@ -1,2 +1,8 @@
+llm_provider: "ollama"
 llm_model_name: "llama3.2:latest"
-embedding_model_name: "BAAI/bge-large-en-v1.5"
+llm_planner_model_name: "llama3.2:latest"
+embedding_model_name: "BAAI/bge-small-en-v1.5"
+reranker_model_name: "BAAI/bge-reranker-base"
+query_fusion_queries: 3
+enable_context_compression: true
+enable_auto_merging: true

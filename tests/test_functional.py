@@ -12,65 +12,112 @@ def cache_resource(func):
     return func
 st.cache_resource = cache_resource
 
+# Define a concrete subclassable mock for Workflow
+class MockWorkflow:
+    def __init__(self, *args, **kwargs):
+        pass
+
+mock_core_workflow = MagicMock()
+mock_core_workflow.Workflow = MockWorkflow
+mock_core_workflow.Event = MagicMock
+mock_core_workflow.StartEvent = MagicMock
+mock_core_workflow.StopEvent = MagicMock
+
 # Mock other heavy dependencies
-# We need to mock the modules structure so that "from X import Y" works
-mock_llama_index_core = MagicMock()
-sys.modules["llama_index.core"] = mock_llama_index_core
-sys.modules["llama_index.core.callbacks"] = MagicMock()
-sys.modules["llama_index.core.callbacks.base_handler"] = MagicMock()
-sys.modules["llama_index.core.chat_engine.types"] = MagicMock()
-sys.modules["llama_index.embeddings.huggingface"] = MagicMock()
-sys.modules["llama_index.llms.ollama"] = MagicMock()
+mocked_modules = {
+    "llama_index.core": MagicMock(),
+    "llama_index.core.node_parser": MagicMock(),
+    "llama_index.core.storage.docstore": MagicMock(),
+    "llama_index.core.response_synthesizers": MagicMock(),
+    "llama_index.core.retrievers": MagicMock(),
+    "llama_index.retrievers.bm25": MagicMock(),
+    "llama_index.core.postprocessor": MagicMock(),
+    "llama_index.core.vector_stores": MagicMock(),
+    "llama_index.core.workflow": mock_core_workflow,
+    "llama_index.core.schema": MagicMock(),
+    "llama_index.core.callbacks": MagicMock(),
+    "llama_index.core.callbacks.base_handler": MagicMock(),
+    "llama_index.core.chat_engine": MagicMock(),
+    "llama_index.core.chat_engine.types": MagicMock(),
+    "llama_index.embeddings.huggingface": MagicMock(),
+    "llama_index.llms.ollama": MagicMock(),
+    "llama_index.llms.google_genai": MagicMock()
+}
 
-# Now import app logic
-# We need to be careful because app.py runs code on import.
-# We will test functions by importing them if possible, or by mocking the whole execution.
-# Since app.py is a script, it's better to test the functions we defined.
-
-# To test functions inside app.py, we might need to refactor app.py to be more modular 
-# or use a trick to import it without running the main block. 
-# For now, let's assume we can import it and the side effects (st.title, etc.) are handled by the mock.
+for mod_name, mock_obj in mocked_modules.items():
+    sys.modules[mod_name] = mock_obj
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Import app logic and rag_engine
 from app import load_config, load_llm, load_embedding_model
+from rag_engine import enrich_document_metadata, IndexManager
 
-def test_load_config_success(tmp_path):
+def test_load_config_success():
     """Test loading a valid config file."""
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text("llm_model_name: test-model\nembedding_model_name: test-embed")
-    
-    with patch("builtins.open", new_callable=MagicMock) as mock_open:
-        # We can't easily patch open for the actual function call if we don't control the path in the function
-        # But load_config hardcodes "config.yaml".
-        # Let's mock yaml.safe_load instead.
-        with patch("yaml.safe_load", return_value={"llm_model_name": "test-model"}) as mock_yaml:
-            with patch("builtins.open"):
-                config = load_config()
-                assert config["llm_model_name"] == "test-model"
+    with patch("yaml.safe_load", return_value={"llm_model_name": "test-model"}) as mock_yaml:
+        with patch("builtins.open"):
+            config = load_config()
+            assert config["llm_model_name"] == "test-model"
 
 def test_load_config_file_not_found():
     """Test behavior when config file is missing."""
-    # Configure st.stop to raise SystemExit to mimic real behavior
     st.stop.side_effect = SystemExit
 
     with patch("builtins.open", side_effect=FileNotFoundError):
         with pytest.raises(SystemExit): 
              load_config()
         
-        # Verify st.error was called
         st.error.assert_called()
         st.stop.assert_called()
 
-def test_load_llm():
-    """Test LLM loading function."""
+def test_load_llm_ollama():
+    """Test Ollama LLM loading function."""
     with patch("app.Ollama") as MockOllama:
-        load_llm()
+        load_llm("ollama", "test-model")
         MockOllama.assert_called_once()
+
+def test_load_llm_gemini():
+    """Test Gemini LLM loading function."""
+    with patch("app.GoogleGenAI") as MockGemini:
+        load_llm("gemini", "models/gemini-2.5-flash", "test-key")
+        MockGemini.assert_called_once()
 
 def test_load_embedding_model():
     """Test Embedding model loading function."""
     with patch("app.HuggingFaceEmbedding") as MockEmbed:
         load_embedding_model()
         MockEmbed.assert_called_once()
+
+def test_enrich_document_metadata():
+    """Test document metadata enrichment with headers and types."""
+    mock_doc = MagicMock()
+    mock_doc.text = "### SYSTEM POLICY\nThis is a sample document text."
+    mock_doc.metadata = {"file_name": "system_policy_v2.txt"}
+    
+    enrich_document_metadata([mock_doc])
+    
+    assert "upload_timestamp" in mock_doc.metadata
+    assert mock_doc.metadata["filename"] == "system_policy_v2.txt"
+    assert mock_doc.metadata["document_type"] == "txt"
+    assert mock_doc.metadata["section"] == "SYSTEM POLICY"
+
+def test_get_indexed_filenames_multi():
+    """Test extraction of indexed filenames in multi-index."""
+    mock_index_dict = {
+        "type": "multi",
+        "summary": MagicMock()
+    }
+    doc_info_1 = MagicMock()
+    doc_info_1.metadata = {"filename": "doc_a.pdf"}
+    doc_info_2 = MagicMock()
+    doc_info_2.metadata = {"filename": "doc_b.docx"}
+    
+    mock_index_dict["summary"].ref_doc_info = {
+        "1": doc_info_1,
+        "2": doc_info_2
+    }
+    
+    filenames = IndexManager.get_indexed_filenames(mock_index_dict)
+    assert set(filenames) == {"doc_a.pdf", "doc_b.docx"}
