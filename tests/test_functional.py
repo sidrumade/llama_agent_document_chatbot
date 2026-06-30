@@ -78,11 +78,6 @@ def test_load_llm_ollama():
         load_llm("ollama", "test-model")
         MockOllama.assert_called_once()
 
-def test_load_llm_gemini():
-    """Test Gemini LLM loading function."""
-    with patch("app.GoogleGenAI") as MockGemini:
-        load_llm("gemini", "models/gemini-2.5-flash", "test-key")
-        MockGemini.assert_called_once()
 
 def test_load_embedding_model():
     """Test Embedding model loading function."""

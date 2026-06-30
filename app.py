@@ -6,6 +6,7 @@ import yaml
 from datetime import datetime
 import asyncio
 import nest_asyncio
+import httpx
 from dotenv import load_dotenv
 
 # Apply nest_asyncio to support nested event loops in Streamlit
@@ -14,7 +15,6 @@ nest_asyncio.apply()
 from llama_index.core import Settings, SimpleDirectoryReader, StorageContext
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
-from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.callbacks import CallbackManager, CBEventType
 from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 
@@ -41,11 +41,64 @@ def load_config():
         st.stop()
 
 config = load_config()
-LLM_PROVIDER = config.get("llm_provider", "ollama")
-LLM_MODEL_NAME = config.get("llm_model_name", "models/gemini-2.5-flash")
-LLM_PLANNER_MODEL_NAME = config.get("llm_planner_model_name", "models/gemini-2.5-flash")
+LLM_MODEL_NAME = config.get("llm_model_name", "llama3.2:latest")
+LLM_PLANNER_MODEL_NAME = config.get("llm_planner_model_name", "llama3.2:latest")
 HUGGINGFACE_EMBEDDING_MODEL_NAME = config.get("embedding_model_name", "BAAI/bge-small-en-v1.5")
 RERANKER_MODEL_NAME = config.get("reranker_model_name", "BAAI/bge-reranker-base")
+
+# Helper to construct resolved Ollama URL from config or env
+def get_ollama_base_url():
+    # 1. Read from config.yaml
+    host = config.get("ollama_host", None)
+    port = config.get("ollama_port", None)
+    
+    # 2. Fallback to environment variables if not in config
+    if not host:
+        host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").strip()
+    
+    host = str(host).strip()
+    
+    # If host is just a port, e.g., "11434"
+    if host.isdigit():
+        port = int(host)
+        host = "127.0.0.1"
+        
+    protocol = "http://"
+    if host.startswith("http://"):
+        host = host[7:]
+    elif host.startswith("https://"):
+        host = host[8:]
+        protocol = "https://"
+        
+    # Replace 0.0.0.0 with 127.0.0.1 for Windows compatibility
+    if "0.0.0.0" in host:
+        host = host.replace("0.0.0.0", "127.0.0.1")
+        
+    if ":" in host:
+        final_host = host
+    else:
+        if port:
+            final_host = f"{host}:{port}"
+        else:
+            final_host = f"{host}:11434"
+            
+    return f"{protocol}{final_host}"
+
+# Helper to check connection status
+def check_ollama_connection(base_url: str) -> tuple[bool, str]:
+    try:
+        url = base_url.rstrip("/") + "/api/tags"
+        response = httpx.get(url, timeout=5.0)
+        if response.status_code == 200:
+            models_data = response.json()
+            models_list = [m["name"] for m in models_data.get("models", [])]
+            models_str = ", ".join(models_list) if models_list else "None"
+            return True, f"Connected! Available models: {models_str}"
+        else:
+            return False, f"Failed. HTTP Status Code: {response.status_code}"
+    except Exception as e:
+        return False, f"Connection failed: {type(e).__name__}: {e}"
+
 # --- End Configuration Loading ---
 
 # Define the custom callback handler for timing
@@ -93,52 +146,31 @@ if not os.path.exists("indexes"):
 with st.sidebar:
     st.header("Model Status")
 
-    # Handle Gemini API Key sidebar input/loading
-    env_api_key = os.environ.get("GEMINI_API_KEY", "")
-    gemini_api_key = st.session_state.get("gemini_api_key", env_api_key)
-
-    if LLM_PROVIDER == "gemini":
-        st.subheader("API Configuration")
-        user_api_key = st.text_input(
-            "Enter Gemini API Key:",
-            type="password",
-            value=gemini_api_key,
-            help="Get your API key from Google AI Studio"
-        )
-        if user_api_key:
-            st.session_state.gemini_api_key = user_api_key
-            gemini_api_key = user_api_key
-
-        # If the API key in session state changes, clear the cached LLMs
-        if "loaded_api_key" not in st.session_state:
-            st.session_state.loaded_api_key = gemini_api_key
-        elif st.session_state.loaded_api_key != gemini_api_key:
-            st.session_state.loaded_api_key = gemini_api_key
-            if "llm" in st.session_state:
-                del st.session_state.llm
-            if "planner_llm" in st.session_state:
-                del st.session_state.planner_llm
-            st.rerun()
+    # Ollama Connection Configuration UI
+    st.subheader("Ollama Connection")
+    resolved_host = get_ollama_base_url()
+    st.caption(f"Host: `{resolved_host}`")
+    
+    if st.button("🔌 Check Ollama Connection", key="check_ollama_conn"):
+        with st.spinner("Pinging Ollama..."):
+            success, msg = check_ollama_connection(resolved_host)
+            if success:
+                st.success(msg)
+            else:
+                st.error(msg)
 
     # Function to handle model loading with progress bars
     @st.cache_resource
     def load_llm(provider, model_name, api_key=None):
-        logging.info(f"Loading LLM ({provider} - {model_name})...")
-        if provider == "gemini":
-            if not api_key:
-                raise ValueError("Gemini API key is required but missing.")
-            return GoogleGenAI(
-                model=model_name,
-                api_key=api_key,
-                context_window=1000000,
-                max_tokens=8192
-            )
-        else:
-            return Ollama(
-                model=model_name,
-                request_timeout=360.0,
-                context_window=8000,
-            )
+        ollama_host = get_ollama_base_url()
+        logging.info(f"Loading LLM (ollama - {model_name})...")
+        logging.info(f"Initializing Ollama client with base_url: {ollama_host}")
+        return Ollama(
+            model=model_name,
+            base_url=ollama_host,
+            request_timeout=360.0,
+            context_window=8000,
+        )
 
     @st.cache_resource
     def load_embedding_model():
@@ -172,11 +204,11 @@ with st.sidebar:
             try:
                 llm_start_time = time.time()
                 # Load primary synthesis LLM
-                st.session_state.llm = load_llm(LLM_PROVIDER, LLM_MODEL_NAME, gemini_api_key)
+                st.session_state.llm = load_llm("ollama", LLM_MODEL_NAME)
                 Settings.llm = st.session_state.llm
                 
                 # Load planning LLM
-                st.session_state.planner_llm = load_llm(LLM_PROVIDER, LLM_PLANNER_MODEL_NAME, gemini_api_key)
+                st.session_state.planner_llm = load_llm("ollama", LLM_PLANNER_MODEL_NAME)
                 
                 llm_end_time = time.time()
                 logging.info(f"LLMs loaded in {llm_end_time - llm_start_time:.2f} seconds.")
@@ -217,10 +249,7 @@ with st.sidebar:
 
     # Initialize models if they are not in session state
     if "llm" not in st.session_state or "embed_model" not in st.session_state or "reranker" not in st.session_state:
-        if LLM_PROVIDER == "gemini" and not gemini_api_key:
-            st.info("Please enter your Gemini API Key in the configuration section above to proceed.")
-        else:
-            initialize_models()
+        initialize_models()
     else:
         st.markdown("Status: <span style='color:green'>●</span> Models Loaded", unsafe_allow_html=True)
 
