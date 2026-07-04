@@ -26,6 +26,7 @@ mock_core_workflow.StopEvent = MagicMock
 # Mock other heavy dependencies
 mocked_modules = {
     "llama_index.core": MagicMock(),
+    "llama_index.core.llms": MagicMock(),
     "llama_index.core.node_parser": MagicMock(),
     "llama_index.core.storage.docstore": MagicMock(),
     "llama_index.core.response_synthesizers": MagicMock(),
@@ -40,8 +41,7 @@ mocked_modules = {
     "llama_index.core.chat_engine": MagicMock(),
     "llama_index.core.chat_engine.types": MagicMock(),
     "llama_index.embeddings.huggingface": MagicMock(),
-    "llama_index.llms.ollama": MagicMock(),
-    "llama_index.llms.google_genai": MagicMock()
+    "llama_index.llms.ollama": MagicMock()
 }
 
 for mod_name, mock_obj in mocked_modules.items():
@@ -116,3 +116,48 @@ def test_get_indexed_filenames_multi():
     
     filenames = IndexManager.get_indexed_filenames(mock_index_dict)
     assert set(filenames) == {"doc_a.pdf", "doc_b.docx"}
+
+def test_configure_logging():
+    """Test that configure_logging successfully configures file handler."""
+    import tempfile
+    import logging
+    from rag_engine import configure_logging
+    
+    # Clear existing handlers to ensure clean configuration for this test
+    root_logger = logging.getLogger()
+    old_handlers = list(root_logger.handlers)
+    for h in old_handlers:
+        root_logger.removeHandler(h)
+        
+    # Use a temp file for logging
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_log:
+        tmp_log_name = tmp_log.name
+        
+    try:
+        configure_logging(tmp_log_name)
+        
+        # Check that we have a file handler
+        handlers = [h for h in root_logger.handlers if isinstance(h, logging.FileHandler)]
+        assert len(handlers) >= 1
+        
+        # Log a message and check it writes
+        logger = logging.getLogger("test_func_logger")
+        logger.setLevel(logging.INFO)
+        logger.info("Functional test log message")
+        
+        # Flush and close handlers
+        for h in handlers:
+            h.flush()
+            h.close()
+            root_logger.removeHandler(h)
+            
+        with open(tmp_log_name, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert "Functional test log message" in content
+    finally:
+        # Restore old handlers to not disrupt pytest's own reporting
+        for h in old_handlers:
+            root_logger.addHandler(h)
+        if os.path.exists(tmp_log_name):
+            os.unlink(tmp_log_name)
+

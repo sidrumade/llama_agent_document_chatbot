@@ -6,8 +6,12 @@ from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, 
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 
+# Add project root to path to import rag_engine
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from rag_engine import configure_logging
+
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+configure_logging("logs/benchmark.log")
 logger = logging.getLogger(__name__)
 
 def benchmark_model_loading():

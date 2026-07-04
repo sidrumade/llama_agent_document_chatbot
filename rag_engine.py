@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional, Union
 
 import streamlit as st
 import yaml
+from llama_index.core.llms import ChatMessage
 
 from llama_index.core import (
     VectorStoreIndex,
@@ -42,12 +43,49 @@ from llama_index.core.workflow import (
 from llama_index.core.schema import NodeWithScore, Document
 
 # Setup logging
+def configure_logging(log_file: str = "logs/chatbot.log"):
+    """Configures the root logger to write logs to both standard output and a file."""
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+        
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Avoid duplicating handlers if already set up
+    has_file_handler = False
+    has_stream_handler = False
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            has_file_handler = True
+        elif isinstance(handler, logging.StreamHandler):
+            has_stream_handler = True
+            
+    if not has_file_handler:
+        try:
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(logging.INFO)
+            root_logger.addHandler(file_handler)
+        except Exception as e:
+            print(f"Warning: Failed to create log file {log_file}: {e}")
+            
+    if not has_stream_handler:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        console_handler.setLevel(logging.INFO)
+        root_logger.addHandler(console_handler)
+
+# Setup initial logger for this module
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Metadata Enrichment ---
 def enrich_document_metadata(documents: List[Document]):
     """Enriches loaded documents with standardized metadata fields."""
+    start_time = time.time()
+    logger.info(f"Enriching metadata for {len(documents)} documents...")
     for doc in documents:
         # Set upload timestamp
         if "upload_timestamp" not in doc.metadata:
@@ -82,6 +120,7 @@ def enrich_document_metadata(documents: List[Document]):
                     if trimmed.startswith(("#", "##", "###")) or (0 < len(trimmed) < 40 and trimmed.isupper()):
                         doc.metadata["section"] = trimmed.lstrip("# ").strip()
                         break
+    logger.info(f"Metadata enrichment completed in {time.time() - start_time:.4f} seconds.")
 
 # --- Index Manager ---
 class IndexManager:
@@ -90,6 +129,8 @@ class IndexManager:
     @staticmethod
     def build_multi_index(documents: List[Document], index_name: str, llm: Any, embed_model: Any) -> Dict[str, Any]:
         """Builds hierarchical, sentence-window, and document summary indexes."""
+        start_total = time.time()
+        logger.info(f"Starting to build multi-index '{index_name}'...")
         enrich_document_metadata(documents)
         
         base_dir = os.path.join("indexes", index_name)
@@ -97,6 +138,7 @@ class IndexManager:
         
         # 1. Hierarchical (Auto-Merging) Index
         logger.info("Building Hierarchical Index...")
+        start_hier = time.time()
         hier_parser = HierarchicalNodeParser.from_defaults(chunk_sizes=[2048, 512, 128])
         hier_nodes = hier_parser.get_nodes_from_documents(documents)
         leaf_nodes = get_leaf_nodes(hier_nodes)
@@ -114,9 +156,11 @@ class IndexManager:
         )
         hier_dir = os.path.join(base_dir, "hierarchical")
         hier_index.storage_context.persist(persist_dir=hier_dir)
+        logger.info(f"Hierarchical Index built and persisted in {time.time() - start_hier:.2f} seconds.")
         
         # 2. Sentence Window Index
         logger.info("Building Sentence Window Index...")
+        start_sw = time.time()
         sw_parser = SentenceWindowNodeParser.from_defaults(
             window_size=3,
             window_metadata_key="window",
@@ -130,9 +174,11 @@ class IndexManager:
         )
         sw_dir = os.path.join(base_dir, "sentence_window")
         sw_index.storage_context.persist(persist_dir=sw_dir)
+        logger.info(f"Sentence Window Index built and persisted in {time.time() - start_sw:.2f} seconds.")
         
         # 3. Document Summary Index
         logger.info("Building Document Summary Index...")
+        start_summary = time.time()
         response_synthesizer = get_response_synthesizer(
             llm=llm,
             response_mode=ResponseMode.TREE_SUMMARIZE
@@ -147,7 +193,9 @@ class IndexManager:
         )
         summary_dir = os.path.join(base_dir, "summary")
         summary_index.storage_context.persist(persist_dir=summary_dir)
+        logger.info(f"Document Summary Index built and persisted in {time.time() - start_summary:.2f} seconds.")
         
+        logger.info(f"Total time to build and persist multi-index '{index_name}': {time.time() - start_total:.2f} seconds.")
         return {
             "type": "multi",
             "hierarchical": hier_index,
@@ -158,6 +206,7 @@ class IndexManager:
     @staticmethod
     def load_index(index_name: str, embed_model: Any) -> Dict[str, Any]:
         """Loads index files with fallback support for legacy indexes."""
+        start_total = time.time()
         base_dir = os.path.join("indexes", index_name)
         hier_dir = os.path.join(base_dir, "hierarchical")
         sw_dir = os.path.join(base_dir, "sentence_window")
@@ -166,15 +215,22 @@ class IndexManager:
         if os.path.exists(hier_dir) and os.path.exists(sw_dir) and os.path.exists(summary_dir):
             logger.info(f"Loading Multi-Index '{index_name}'...")
             
+            start_hier = time.time()
             hier_storage_context = StorageContext.from_defaults(persist_dir=hier_dir)
             hier_index = load_index_from_storage(hier_storage_context, embed_model=embed_model)
+            logger.info(f"Hierarchical Index loaded in {time.time() - start_hier:.2f} seconds.")
             
+            start_sw = time.time()
             sw_storage_context = StorageContext.from_defaults(persist_dir=sw_dir)
             sw_index = load_index_from_storage(sw_storage_context, embed_model=embed_model)
+            logger.info(f"Sentence Window Index loaded in {time.time() - start_sw:.2f} seconds.")
             
+            start_summary = time.time()
             summary_storage_context = StorageContext.from_defaults(persist_dir=summary_dir)
             summary_index = load_index_from_storage(summary_storage_context, embed_model=embed_model)
+            logger.info(f"Document Summary Index loaded in {time.time() - start_summary:.2f} seconds.")
             
+            logger.info(f"Total time to load Multi-Index '{index_name}': {time.time() - start_total:.2f} seconds.")
             return {
                 "type": "multi",
                 "hierarchical": hier_index,
@@ -185,6 +241,7 @@ class IndexManager:
             logger.info(f"Loading Legacy Index '{index_name}'...")
             storage_context = StorageContext.from_defaults(persist_dir=base_dir)
             index = load_index_from_storage(storage_context, embed_model=embed_model)
+            logger.info(f"Total time to load Legacy Index '{index_name}': {time.time() - start_total:.2f} seconds.")
             return {
                 "type": "legacy",
                 "index": index
@@ -241,6 +298,10 @@ class PostprocessStepEvent(Event):
 
 class TextChunkEvent(Event):
     text: str
+
+class StepTimingEvent(Event):
+    step_name: str
+    duration: float
 
 # Let's define the Events for payload passing:
 class PlannedPlanEvent(Event):
@@ -321,7 +382,7 @@ class RefinedAgenticWorkflow(Workflow):
                 similarity_top_k=top_k,
                 num_queries=num_queries,
                 mode="reciprocal_rerank",
-                use_async=False
+                use_async=True
             )
             
         if strategy == "summary":
@@ -342,7 +403,7 @@ class RefinedAgenticWorkflow(Workflow):
                 similarity_top_k=top_k,
                 num_queries=num_queries,
                 mode="reciprocal_rerank",
-                use_async=False
+                use_async=True
             )
             
             if self.settings.get("enable_auto_merging", True):
@@ -367,7 +428,7 @@ class RefinedAgenticWorkflow(Workflow):
                 similarity_top_k=top_k,
                 num_queries=num_queries,
                 mode="reciprocal_rerank",
-                use_async=False
+                use_async=True
             )
         else:
             return self._get_retriever("hierarchical", metadata_filters, top_k)
@@ -375,6 +436,7 @@ class RefinedAgenticWorkflow(Workflow):
     @step
     async def plan_query(self, ctx: Context, ev: StartEvent) -> PlannedPlanEvent:
         """Executes LLM planning step."""
+        start_time = time.time()
         query = getattr(ev, "query", None)
         if not query or not isinstance(query, str):
             logger.warning("Query not provided or is invalid. Defaulting to 'general query'.")
@@ -382,10 +444,9 @@ class RefinedAgenticWorkflow(Workflow):
             
         available_files = IndexManager.get_indexed_filenames(self.index_dict)
         
-        planner_prompt = f"""You are an Agentic Query Planner for a document retrieval system.
-Your goal is to analyze the user's query and decide the best retrieval plan.
-
-Available Files in the database:
+        system_prompt = "You are an Agentic Query Planner for a document retrieval system. Your goal is to analyze the user's query and decide the best retrieval plan."
+        
+        user_prompt = f"""Available Files in the database:
 {available_files}
 
 User Query: "{query}"
@@ -406,9 +467,13 @@ You must output a JSON object with the following fields:
 Return ONLY the JSON block. Do not include markdown formatting or backticks outside the JSON itself.
 JSON:
 """
+        messages = [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_prompt)
+        ]
         
-        response = await self.llm.acomplete(planner_prompt)
-        cleaned_response = self._clean_json_text(response.text)
+        response = await self.llm.achat(messages)
+        cleaned_response = self._clean_json_text(response.message.content)
         
         try:
             plan_data = json.loads(cleaned_response)
@@ -433,6 +498,10 @@ JSON:
             reasoning=reasoning
         ))
         
+        duration = time.time() - start_time
+        ctx.write_event_to_stream(StepTimingEvent(step_name="Query Planning", duration=duration))
+        logger.info(f"Workflow Step [Query Planning] completed in {duration:.2f} seconds.")
+        
         return PlannedPlanEvent(
             query=query,
             strategy=strategy,
@@ -443,15 +512,14 @@ JSON:
 
     @step
     async def retrieve_context(self, ctx: Context, ev: PlannedPlanEvent) -> RetrievedNodesEvent:
-        """Runs the query fusion / summary / hierarchical retrievers."""
+        """Runs the query fusion / summary / hierarchical retrievers in parallel."""
+        start_time = time.time()
         all_retrieved_nodes = []
         metadata_filters = self._build_metadata_filters(ev.metadata_filters)
         
-        for sub_query in ev.sub_queries:
+        async def retrieve_for_query(sub_query: str):
             retriever = self._get_retriever(ev.strategy, metadata_filters)
-            
             if ev.strategy == "summary":
-                # Find documents by summary
                 summary_nodes = await retriever.aretrieve(sub_query)
                 relevant_files = []
                 for n in summary_nodes:
@@ -461,7 +529,6 @@ JSON:
                 
                 ctx.write_event_to_stream(PostprocessStepEvent(msg=f"Found relevant documents via summaries: {relevant_files}. Retrieving detailed chunks."))
                 
-                # Fetch details
                 sub_filters = None
                 if relevant_files:
                     from llama_index.core.vector_stores import FilterOperator
@@ -472,11 +539,14 @@ JSON:
                 
                 detail_retriever = self._get_retriever("hierarchical", sub_filters)
                 sub_nodes = await detail_retriever.aretrieve(sub_query)
-                all_retrieved_nodes.extend(summary_nodes)
-                all_retrieved_nodes.extend(sub_nodes)
+                return summary_nodes + sub_nodes
             else:
-                sub_nodes = await retriever.aretrieve(sub_query)
-                all_retrieved_nodes.extend(sub_nodes)
+                return await retriever.aretrieve(sub_query)
+
+        tasks = [retrieve_for_query(sq) for sq in ev.sub_queries]
+        results = await asyncio.gather(*tasks)
+        for r in results:
+            all_retrieved_nodes.extend(r)
                 
         # Deduplicate
         unique_nodes = {}
@@ -489,6 +559,10 @@ JSON:
             strategy=ev.strategy
         ))
         
+        duration = time.time() - start_time
+        ctx.write_event_to_stream(StepTimingEvent(step_name="Context Retrieval", duration=duration))
+        logger.info(f"Workflow Step [Context Retrieval] completed in {duration:.2f} seconds. Retrieved {len(deduped_nodes)} nodes.")
+        
         return RetrievedNodesEvent(
             query=ev.query,
             strategy=ev.strategy,
@@ -498,6 +572,7 @@ JSON:
     @step
     async def postprocess_context(self, ctx: Context, ev: RetrievedNodesEvent) -> ProcessedContextEvent:
         """Applies sentence window replacement, reranking, long context reordering, and LLM extraction."""
+        start_time = time.time()
         nodes = ev.nodes
         
         # 1. If sentence window, replace with full window text before reranking
@@ -515,16 +590,17 @@ JSON:
         enable_compression = self.settings.get("enable_context_compression", True)
         if enable_compression and nodes:
             ctx.write_event_to_stream(PostprocessStepEvent(msg="Performing contextual compression on top documents..."))
+            start_compression = time.time()
             try:
                 # Compress only top 4 nodes to keep latency low
                 nodes_to_compress = nodes[:4]
                 other_nodes = nodes[4:]
-                compressed_nodes = []
-                for node_with_score in nodes_to_compress:
+                
+                system_prompt = "You are an information extraction assistant. Given the document text and the user query, extract ONLY the sentences from the document text that are directly relevant to answering the query."
+                
+                async def compress_single_node(node_with_score):
                     node = node_with_score.node
-                    compression_prompt = f"""You are an information extraction assistant.
-Given the document text and the user query, extract ONLY the sentences from the document text that are directly relevant to answering the query.
-Do not rewrite or summarize. Extract the sentences word-for-word. If no sentences are relevant, reply with "No relevant information".
+                    user_prompt = f"""Do not rewrite or summarize. Extract the sentences word-for-word. If no sentences are relevant, reply with "No relevant information".
 
 Query: "{ev.query}"
 Document Text:
@@ -533,12 +609,20 @@ Document Text:
 ---
 
 Relevant sentences:"""
-                    response = await self.llm.acomplete(compression_prompt)
-                    cleaned_txt = response.text.strip()
+                    messages = [
+                        ChatMessage(role="system", content=system_prompt),
+                        ChatMessage(role="user", content=user_prompt)
+                    ]
+                    response = await self.llm.achat(messages)
+                    cleaned_txt = response.message.content.strip()
                     if cleaned_txt and cleaned_txt != "No relevant information":
                         node.text = cleaned_txt
-                    compressed_nodes.append(node_with_score)
-                nodes = compressed_nodes + other_nodes
+                    return node_with_score
+
+                tasks = [compress_single_node(n) for n in nodes_to_compress]
+                compressed_nodes = await asyncio.gather(*tasks)
+                nodes = list(compressed_nodes) + other_nodes
+                logger.info(f"Contextual compression of {len(nodes_to_compress)} nodes completed in {time.time() - start_compression:.2f} seconds.")
             except Exception as ex:
                 logger.error(f"Compression failed: {ex}. Continuing without compression.")
                 
@@ -560,6 +644,10 @@ Relevant sentences:"""
             context_str += f"Text:\n{node.text}\n"
             context_str += f"---------------------\n\n"
             
+        duration = time.time() - start_time
+        ctx.write_event_to_stream(StepTimingEvent(step_name="Post-processing & Compression", duration=duration))
+        logger.info(f"Workflow Step [Post-processing & Compression] completed in {duration:.2f} seconds.")
+            
         return ProcessedContextEvent(
             query=ev.query,
             nodes=nodes,
@@ -569,10 +657,11 @@ Relevant sentences:"""
     @step
     async def synthesize(self, ctx: Context, ev: ProcessedContextEvent) -> StopEvent:
         """Synthesizes the final source-cited response using streaming."""
-        prompt = f"""You are an expert AI Assistant answering questions based on document context.
-Your goal is to answer the query accurately and cite your sources.
-
-Context Information:
+        start_time = time.time()
+        
+        system_prompt = "You are an expert AI Assistant answering questions based on document context. Your goal is to answer the query accurately and cite your sources."
+        
+        user_prompt = f"""Context Information:
 ---------------------
 {ev.context_str}
 ---------------------
@@ -588,8 +677,12 @@ Instructions:
 
 Answer:
 """
+        messages = [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_prompt)
+        ]
         
-        response_stream = await self.llm.astream_complete(prompt)
+        response_stream = await self.llm.astream_chat(messages)
         full_response = ""
         async for chunk in response_stream:
             full_response += chunk.delta
@@ -607,6 +700,10 @@ Answer:
                 "section": meta.get("section", "General"),
                 "confidence": score
             })
+            
+        duration = time.time() - start_time
+        ctx.write_event_to_stream(StepTimingEvent(step_name="Synthesis & Streaming", duration=duration))
+        logger.info(f"Workflow Step [Synthesis & Streaming] completed in {duration:.2f} seconds.")
             
         return StopEvent(result={
             "response": full_response,

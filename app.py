@@ -19,13 +19,12 @@ from llama_index.core.callbacks import CallbackManager, CBEventType
 from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 
 # Import from our new RAG engine
-from rag_engine import IndexManager, RefinedAgenticWorkflow, PlanStepEvent, RetrievalStepEvent, PostprocessStepEvent, TextChunkEvent
+from rag_engine import IndexManager, RefinedAgenticWorkflow, PlanStepEvent, RetrievalStepEvent, PostprocessStepEvent, TextChunkEvent, StepTimingEvent, configure_logging
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Logging will be configured below after config loading
 
 # --- Configuration Loading ---
 def load_config():
@@ -41,6 +40,8 @@ def load_config():
         st.stop()
 
 config = load_config()
+log_file_path = config.get("log_file", "logs/chatbot.log")
+configure_logging(log_file_path)
 LLM_MODEL_NAME = config.get("llm_model_name", "llama3.2:latest")
 LLM_PLANNER_MODEL_NAME = config.get("llm_planner_model_name", "llama3.2:latest")
 HUGGINGFACE_EMBEDDING_MODEL_NAME = config.get("embedding_model_name", "BAAI/bge-small-en-v1.5")
@@ -377,6 +378,12 @@ for message in st.session_state.messages:
                     st.markdown(
                         f"**[{cite['index']}] {cite['filename']}** (Page {cite['page_number']}, Section: `{cite['section']}`) — *Relevance: {cite['confidence']}%*"
                     )
+        if "timings" in message and message["timings"]:
+            with st.expander("⏱️ Smart Profiling", expanded=False):
+                total_time = sum(message["timings"].values())
+                st.markdown(f"**Total Execution Time:** `{total_time:.2f}s`")
+                for step_name, duration in message["timings"].items():
+                    st.write(f"- **{step_name}**: `{duration:.2f}s`")
 
 # Inform user if models are not loaded
 if "llm" not in st.session_state:
@@ -422,7 +429,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
             
             # Streaming Output Block
             message_placeholder = st.empty()
-            state = {"full_response": "", "citations_data": []}
+            state = {"full_response": "", "citations_data": [], "timings": {}}
             
             async def run_workflow_stream():
                 user_query = st.session_state.messages[-1]["content"]
@@ -441,6 +448,9 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
                     elif isinstance(event, TextChunkEvent):
                         state["full_response"] += event.text
                         message_placeholder.markdown(state["full_response"] + "▌")
+                    elif isinstance(event, StepTimingEvent):
+                        state["timings"][event.step_name] = event.duration
+                        logging.info(f"Profiling: {event.step_name} took {event.duration:.2f} seconds.")
                         
                 # Retrieve final response block
                 result = await handler
@@ -457,11 +467,12 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
                 # Render final text without cursor
                 message_placeholder.markdown(final_txt)
                 
-                # Store final text and citations in chat history
+                # Store final text, citations, and timings in chat history
                 st.session_state.messages.append({
                     "role": "assistant", 
                     "content": final_txt,
-                    "citations": state["citations_data"]
+                    "citations": state["citations_data"],
+                    "timings": state["timings"]
                 })
                 
                 if state["citations_data"]:
@@ -470,9 +481,26 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
                             st.markdown(
                                 f"**[{cite['index']}] {cite['filename']}** (Page {cite['page_number']}, Section: `{cite['section']}`) — *Relevance: {cite['confidence']}%*"
                             )
+                            
+                # Show timings expander
+                if state["timings"]:
+                    with st.expander("⏱️ Smart Profiling", expanded=False):
+                        total_time = sum(state["timings"].values())
+                        st.markdown(f"**Total Execution Time:** `{total_time:.2f}s`")
+                        for step_name, duration in state["timings"].items():
+                            st.write(f"- **{step_name}**: `{duration:.2f}s`")
             except Exception as e:
                 logging.error(f"Error executing agentic workflow: {e}", exc_info=True)
-                st.error(f"Error executing agentic workflow: {e}")
+                if "WorkflowTimeoutError" in type(e).__name__ or "timeout" in str(e).lower():
+                    st.error("⏱️ Workflow execution timed out (limit: 120 seconds).")
+                else:
+                    st.error(f"❌ Error executing agentic workflow: {e}")
+                
+                # Display partial timings if available to show where it was stuck
+                if state["timings"]:
+                    with st.expander("⏱️ Partial Query Profiling (Before Error/Timeout)", expanded=True):
+                        for step_name, duration in state["timings"].items():
+                            st.write(f"- **{step_name}**: `{duration:.2f}s`")
                 st.stop()
             
             end_time = time.time()
